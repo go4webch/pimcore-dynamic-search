@@ -28,6 +28,8 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class SearchFrontendController extends FrontendController
 {
+    const SUMMARY_LENGTH = 255;
+
     public function __construct(
         protected FormFactoryInterface $formFactory,
         protected ConfigurationInterface $configuration,
@@ -78,6 +80,7 @@ class SearchFrontendController extends FrontendController
             try {
                 $searchActive = true;
                 $outputChannelResult = $this->outputChannelWorkflowProcessor->dispatchOutputChannelQuery($contextName, $outputChannelName);
+//                dd($outputChannelResult);
             } catch (\Throwable $e) {
                 $hasError = true;
                 $errorMessage = sprintf(
@@ -141,7 +144,22 @@ class SearchFrontendController extends FrontendController
         ];
 
         if ($outputChannelResult instanceof OutputChannelResultInterface) {
-            return $this->renderTemplate($viewName, array_merge($params, $this->prepareQueryVars($outputChannelResult)));
+            $mergedParams = array_merge($params, $this->prepareQueryVars($outputChannelResult));
+
+            $additionalInformation = [];
+
+            $searchQuery = $this->cleanRequestString($request->get('q'));
+
+            if (!empty($searchQuery)) {
+                $query = $this->cleanTerm($searchQuery);
+            }
+
+            foreach ($mergedParams['paginator'] as $key => $value) {
+                $additionalInformation[$key]['summary'] = $this->getSummaryForUrl($value['full_content'], $query);
+                $additionalInformation[$key]['description'] = $this->getSummaryForUrl($value['description'], $query);
+            }
+
+            return $this->renderTemplate($viewName, array_merge($params, array_merge($mergedParams, ['additional_information' => $additionalInformation])));
         }
 
         $blocks = [];
@@ -151,6 +169,7 @@ class SearchFrontendController extends FrontendController
             }
         }
 
+        //FF, here output for SearchFrontendController
         return $this->renderTemplate($viewName, array_merge($params, ['blocks' => $blocks]));
     }
 
@@ -225,5 +244,155 @@ class SearchFrontendController extends FrontendController
         }
 
         return $contextConfig[$contextName]['output_channels'][$outputChannelName];
+    }
+
+    /**
+     * @param $content
+     * @param $queryStr
+     *
+     * @return mixed|string
+     */
+    public function getSummaryForUrl($content, $queryStr)
+    {
+        $queryElements = explode(' ', $queryStr);
+
+        //remove additional whitespaces
+        $content = preg_replace('/[\s]+/', ' ', $content);
+
+        $summary = $this->getHighlightedSummary($content, $queryElements);
+
+        if ($summary === false) {
+            return substr($content, 0, self::SUMMARY_LENGTH);
+        }
+
+        return $summary;
+    }
+
+    /**
+     * finds the query strings position in the text
+     *
+     * @param  string $text
+     * @param  string $queryStr
+     *
+     * @return int
+     */
+    protected function findPosInSummary($text, $queryStr)
+    {
+        $pos = stripos($text, ' ' . $queryStr . ' ');
+        if ($pos === false) {
+            $pos = stripos($text, '"' . $queryStr . '"');
+        }
+        if ($pos === false) {
+            $pos = stripos($text, '"' . $queryStr . '"');
+        }
+        if ($pos === false) {
+            $pos = stripos($text, ' ' . $queryStr . '-');
+        }
+        if ($pos === false) {
+            $pos = stripos($text, '-' . $queryStr . ' ');
+        }
+        if ($pos === false) {
+            $pos = stripos($text, $queryStr . ' ');
+        }
+        if ($pos === false) {
+            $pos = stripos($text, ' ' . $queryStr);
+        }
+        if ($pos === false) {
+            $pos = stripos($text, $queryStr);
+        }
+
+        return $pos;
+    }
+
+    /**
+     * extracts summary with highlighted search word from source text
+     *
+     * @param string   $text
+     * @param string[] $queryTokens
+     *
+     * @return string
+     */
+    protected function getHighlightedSummary($text, $queryTokens)
+    {
+        $pos = false;
+        $tokenInUse = $queryTokens[0];
+
+        foreach ($queryTokens as $queryStr) {
+            $tokenInUse = $queryStr;
+            $pos = $this->findPosInSummary($text, $queryStr);
+
+            if ($pos !== false) {
+                break;
+            }
+        }
+
+        if ($pos !== false) {
+            $start = $pos - 100;
+
+            if ($start < 0) {
+                $start = 0;
+            }
+
+            $summary = substr($text, $start, self::SUMMARY_LENGTH + strlen($tokenInUse));
+            $summary = trim($summary);
+
+            $tokens = explode(' ', $summary);
+
+            if (strtolower($tokens[0]) != strtolower($tokenInUse)) {
+                $tokens = array_slice($tokens, 1, -1);
+            } else {
+                $tokens = array_slice($tokens, 0, -1);
+            }
+
+            $trimmedSummary = implode(' ', $tokens);
+
+            foreach ($queryTokens as $queryStr) {
+                $trimmedSummary = preg_replace('@([ \'")(-:.,;])(' . $queryStr . ')([ \'")(-:.,;])@si',
+                    " <span class=\"highlight\">\\1\\2\\3</span>", $trimmedSummary);
+                $trimmedSummary = preg_replace('@^(' . $queryStr . ')([ \'")(-:.,;])@si',
+                    " <span class=\"highlight\">\\1\\2</span>", $trimmedSummary);
+                $trimmedSummary = preg_replace('@([ \'")(-:.,;])(' . $queryStr . ')$@si',
+                    " <span class=\"highlight\">\\1\\2</span>", $trimmedSummary);
+            }
+
+            return empty($trimmedSummary) ? false : $trimmedSummary;
+        }
+
+        return false;
+    }
+
+    /**
+     * remove evil stuff from request string
+     *
+     * @param  string $requestString
+     *
+     * @return string
+     */
+    public function cleanRequestString($requestString)
+    {
+        $queryFromRequest = strip_tags(urldecode($requestString));
+        $queryFromRequest = str_replace(['<', '>', '"', "'", '&'], '', $queryFromRequest);
+
+        return $queryFromRequest;
+    }
+
+    /**
+     * @param $term
+     *
+     * @return string
+     */
+    public function cleanTerm($term)
+    {
+        return trim(
+            preg_replace('|\s{2,}|', ' ',
+                preg_replace('|[^\p{L}\p{N} ]/u|', ' ',
+                    strtolower(
+                        strip_tags(
+                            str_replace(["\n", '<'], [' ', ' <'], $term)
+                        )
+                    )
+                )
+            )
+        );
     }
 }
