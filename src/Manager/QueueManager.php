@@ -45,8 +45,31 @@ class QueueManager implements QueueManagerInterface
             $sql = $this->connection->getDatabasePlatform()->getTruncateTableSQL($this->tableName);
             $this->connection->executeStatement($sql);
             $this->logger->debug(sprintf('data queue cleared. Affected jobs: %d', $affectedRows), 'queue', 'default');
+            $this->deleteDir(PIMCORE_PRIVATE_VAR . '/bundles/DsLuceneBundle/index/genesis');
+            $this->logger->debug('genesis Index cleared', 'queue', 'default');
         } catch (\Throwable $e) {
             $this->logger->error(sprintf('Error while clearing queue. Message was: %s', $e->getMessage()), 'queue', 'default');
         }
     }
+
+    private function deleteDir(string $dirPath): bool
+    {
+        if (!is_dir($dirPath)) {
+            return false;
+        }
+
+        $items = array_diff(scandir($dirPath), ['.', '..']);
+
+        foreach ($items as $item) {
+            $itemPath = $dirPath . DIRECTORY_SEPARATOR . $item;
+            if (is_dir($itemPath)) {
+                $this->deleteDir($itemPath); // recursive
+            } else {
+                unlink($itemPath);
+            }
+        }
+
+        return rmdir($dirPath); // remove the empty directory
+    }
+
 }
